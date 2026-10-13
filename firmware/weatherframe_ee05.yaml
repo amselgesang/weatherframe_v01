@@ -1,0 +1,266 @@
+# E-paper weather frame — firmware for the Seeed Studio XIAO ePaper Display Board EE05
+# (XIAO ESP32-S3 Plus, 24-pin FPC straight to the Waveshare 7.5" V2 panel, JST battery, charger).
+#   esphome run weatherframe_ee05.yaml        (first time over USB-C, later OTA in maintenance mode)
+#
+# Wake cycle (every 15 min, aligned to :00/:15/:30/:45):
+#   boot -> battery -> Wi-Fi -> Open-Meteo -> panel on, refresh, panel off -> deep sleep
+# Buttons on the side of the EE05:
+#   KEY1  refresh now (wakes the frame from deep sleep)
+#   KEY2  maintenance mode on/off: stays awake for OTA, logs and Home Assistant (auto-off after 30 min)
+#
+# Pin sources: panel pins from Seeed_GFX (User_Setups/EPaper_Board_Pins_Setups.h, EE05),
+# battery and button pins from Seeed's EE04 wiki (same XIAO ESP32-S3 Plus base).
+# If a button or the battery reading misbehaves, check these first.
+
+substitutions:
+  name: weatherframe
+  location_name: "Budapest"
+  latitude: "47.4979"
+  longitude: "19.0402"
+  german: "true"          # "false" for English labels
+  fahrenheit: "false"     # "true" for °F / mph
+  interval_s: "900"       # wake interval in seconds
+  quiet_start: "0"        # no updates from 00:00 ...
+  quiet_end: "6"          # ... until 06:00 local time (set both equal to disable)
+  low_battery_v: "3.40"
+  battery_divider: "2.0"  # calibrate once: (multimeter voltage) / (reported voltage) * 2.0
+  maint_timeout_min: "30"
+
+  # EE05 pin map
+  pin_epd_clk: GPIO7      # D8
+  pin_epd_mosi: GPIO9     # D10
+  pin_epd_cs: GPIO44      # D7
+  pin_epd_dc: GPIO10      # D16
+  pin_epd_rst: GPIO38     # D11
+  pin_epd_busy: GPIO4     # D3
+  pin_epd_pwr: GPIO43     # D6, high = panel powered
+  pin_vbat: GPIO1         # A0, battery divider
+  pin_vbat_en: GPIO6      # A5, high = divider connected
+  pin_key1: GPIO2         # refresh
+  pin_key2: GPIO3         # maintenance
+  pin_key3: GPIO5         # spare
+
+esphome:
+  name: ${name}
+  friendly_name: Weather Frame
+  on_boot:
+    priority: -100
+    then:
+      - script.execute: wake_cycle
+
+esp32:
+  variant: esp32s3
+  board: seeed_xiao_esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+packages:
+  common: !include weatherframe/common.yaml
+
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  reboot_timeout: 0s
+  power_save_mode: light
+
+api:
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+time:
+  - platform: sntp
+    id: wf_clock
+
+globals:
+  - id: maint_mode
+    type: bool
+    initial_value: "false"
+  - id: maint_since
+    type: uint32_t
+    initial_value: "0"
+
+deep_sleep:
+  id: sleeper
+  sleep_duration: 15min
+  run_duration: 90s       # safety net: never stay awake longer than this (unless maintenance)
+  esp32_ext1_wakeup:
+    pins:
+      - number: ${pin_key1}
+        allow_other_uses: true
+      - number: ${pin_key2}
+        allow_other_uses: true
+    mode: ANY_LOW
+
+spi:
+  clk_pin: ${pin_epd_clk}
+  mosi_pin: ${pin_epd_mosi}
+
+output:
+  - platform: gpio
+    id: vbat_enable
+    pin: ${pin_vbat_en}
+
+sensor:
+  - platform: adc
+    id: vbat
+    name: Battery voltage
+    pin: ${pin_vbat}
+    attenuation: 12db
+    samples: 16
+    update_interval: never
+    filters:
+      - multiply: ${battery_divider}
+
+  # no SHT40 on this hardware: the screen shows tomorrow's forecast in that spot
+  - platform: template
+    id: indoor_temp
+    update_interval: never
+    lambda: return NAN;
+  - platform: template
+    id: indoor_hum
+    update_interval: never
+    lambda: return NAN;
+
+binary_sensor:
+  # the EE05 has no charge-status or USB-detect pin wired to the XIAO
+  - platform: template
+    id: usb_power
+    lambda: return false;
+  - platform: template
+    id: charging
+    lambda: return false;
+  - platform: gpio
+    id: key1
+    name: Refresh button
+    pin:
+      number: ${pin_key1}
+      inverted: true
+      allow_other_uses: true
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      - script.execute: wake_cycle
+  - platform: gpio
+    id: key2
+    name: Maintenance button
+    pin:
+      number: ${pin_key2}
+      inverted: true
+      allow_other_uses: true
+      mode:
+        input: true
+        pullup: true
+    on_press:
+      - lambda: |-
+          id(maint_mode) = !id(maint_mode);
+          id(maint_since) = millis();
+          ESP_LOGI("weatherframe", "Maintenance mode %s", id(maint_mode) ? "ON" : "OFF");
+      - if:
+          condition:
+            lambda: return id(maint_mode);
+          then:
+            - deep_sleep.prevent: sleeper
+          else:
+            - deep_sleep.allow: sleeper
+            - deep_sleep.enter: sleeper
+
+interval:
+  - interval: 60s
+    then:
+      - if:
+          condition:
+            lambda: return id(maint_mode) && millis() - id(maint_since) > ${maint_timeout_min} * 60000UL;
+          then:
+            - lambda: |-
+                id(maint_mode) = false;
+                ESP_LOGI("weatherframe", "Maintenance mode timed out");
+            - deep_sleep.allow: sleeper
+            - script.execute: wake_cycle
+
+display:
+  - platform: epaper_spi
+    id: epd
+    model: waveshare-7.5in-v2
+    cs_pin: ${pin_epd_cs}
+    dc_pin: ${pin_epd_dc}
+    reset_pin: ${pin_epd_rst}
+    busy_pin:
+      number: ${pin_epd_busy}
+      inverted: true      # UC8179 BUSY is low while busy
+    enable_pin: ${pin_epd_pwr}   # panel power is switched off between refreshes
+    update_interval: never
+    lambda: ${render_lambda}
+
+script:
+  - id: wake_cycle
+    mode: single
+    then:
+      # Holding KEY2 while the frame wakes up enters maintenance mode directly.
+      - if:
+          condition:
+            lambda: return id(key2).state && !id(maint_mode);
+          then:
+            - lambda: |-
+                id(maint_mode) = true;
+                id(maint_since) = millis();
+            - deep_sleep.prevent: sleeper
+      - output.turn_on: vbat_enable
+      - delay: 10ms
+      - component.update: vbat
+      - output.turn_off: vbat_enable
+      - lambda: |-
+          // A reading outside 2.8-4.5 V means the divider factor is wrong: never lock into low-battery mode then.
+          float v = id(vbat).has_state() ? id(vbat).state : NAN;
+          bool plausible = !std::isnan(v) && v > 2.8f && v < 4.5f;
+          if (!plausible) ESP_LOGW("weatherframe", "Battery reading %.2f V not plausible, check battery_divider", v);
+          id(low_battery) = plausible && v < ${low_battery_v};
+      - if:
+          condition:
+            lambda: return !id(low_battery);
+          then:
+            - wait_until:
+                condition:
+                  wifi.connected:
+                timeout: 15s
+            - if:
+                condition:
+                  wifi.connected:
+                then:
+                  - wait_until:
+                      condition:
+                        lambda: return id(wf_clock).now().is_valid();
+                      timeout: 3s
+                  - script.execute: fetch_weather
+                  - script.wait: fetch_weather
+      - component.update: epd
+      - delay: 200ms
+      - wait_until:
+          condition:
+            lambda: return id(epd).is_idle();
+          timeout: 30s
+      - if:
+          condition:
+            lambda: return !id(maint_mode);
+          then:
+            - deep_sleep.enter:
+                id: sleeper
+                # Low battery: only wake for a button or to re-check every 6 h.
+                sleep_duration: !lambda |-
+                  if (id(low_battery)) return 6u * 3600u * 1000u;
+                  auto now = id(wf_clock).now();
+                  return wf::next_sleep_ms(now.is_valid() ? now.timestamp : 0,
+                                           ${interval_s}, ${quiet_start}, ${quiet_end});

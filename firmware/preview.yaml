@@ -1,0 +1,72 @@
+# Desktop preview of the weather frame layout (ESPHome host platform + SDL window).
+#   esphome run preview.yaml
+# A BMP snapshot is written to .esphome/snapshots/weatherframe-preview/ after the first draw.
+# Fetches live Open-Meteo data; indoor/battery values are fake template sensors.
+
+substitutions:
+  latitude: "47.4979"
+  longitude: "19.0402"
+  location_name: "Budapest"
+  german: "true"
+  fahrenheit: "false"
+  headless: "false"  # esphome -s headless true run preview.yaml  -> writes a snapshot without a window
+
+esphome:
+  name: weatherframe-preview
+  on_boot:
+    priority: -100
+    then:
+      - delay: 500ms
+      - component.update: indoor_temp
+      - component.update: indoor_hum
+      - component.update: vbat
+      - script.execute: fetch_weather
+      - script.wait: fetch_weather
+      - component.update: epd
+      - delay: 1s
+      - snapshot.take:
+          id: epd
+          filename: preview.bmp
+
+host:
+
+logger:
+  level: INFO
+
+packages:
+  common: !include weatherframe/common.yaml
+
+time:
+  - platform: host
+    id: wf_clock
+
+sensor:
+  - platform: template
+    id: indoor_temp
+    lambda: return 21.4;
+  - platform: template
+    id: indoor_hum
+    lambda: return 47.0;
+  - platform: template
+    id: vbat
+    lambda: return 3.86;
+
+binary_sensor:
+  - platform: template
+    id: charging
+    lambda: return false;
+  - platform: template
+    id: usb_power
+    lambda: return false;
+
+display:
+  - platform: sdl
+    id: epd
+    show_test_card: false
+    headless: ${headless}
+    update_interval: never
+    auto_clear_enabled: false
+    lambda: ${render_lambda}
+    dimensions:
+      width: 800
+      height: 480

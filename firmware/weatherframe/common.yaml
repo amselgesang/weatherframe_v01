@@ -1,0 +1,150 @@
+# Shared by weatherframe.yaml (device) and preview.yaml (Mac SDL preview).
+# Provides ${render_lambda} for the display component.
+# Expects these ids to exist in the including file:
+#   wf_clock (time), indoor_temp / indoor_hum / vbat (sensor), charging / usb_power (binary_sensor)
+
+esphome:
+  includes:
+    - weatherframe/weatherframe.h
+
+json:
+
+http_request:
+  timeout: 10s
+  verify_ssl: true
+
+globals:
+  - id: fetch_ok
+    type: bool
+    initial_value: "false"
+  - id: low_battery
+    type: bool
+    initial_value: "false"
+
+script:
+  # Fetch Open-Meteo once and update the RTC-memory cache.
+  - id: fetch_weather
+    mode: single
+    then:
+      - lambda: id(fetch_ok) = false;
+      - http_request.get:
+          url: !lambda return wf::build_url(${latitude}, ${longitude}, ${fahrenheit});
+          capture_response: true
+          max_response_buffer_size: 8kB
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code == 200 && wf::parse(body)) {
+                    id(fetch_ok) = true;
+                    auto now = id(wf_clock).now();
+                    wf::set_fetched(now.is_valid() ? now.timestamp : 0);
+                  } else {
+                    ESP_LOGW("weatherframe", "HTTP %d", response->status_code);
+                  }
+          on_error:
+            then:
+              - logger.log:
+                  level: WARN
+                  format: "Open-Meteo request failed, showing cached data"
+
+substitutions:
+  # Display lambda body; used as `lambda: ${render_lambda}` in the including file.
+  render_lambda: |-
+      wf::Fonts fonts{id(f_huge), id(f_large), id(f_medium), id(f_small), id(i_xl), id(i_l), id(i_s)};
+      auto now = id(wf_clock).now();
+      wf::Status s{
+        "${location_name}",
+        ${german},
+        ${fahrenheit},
+        now.is_valid() ? (int64_t) now.timestamp : 0,
+        id(indoor_temp).has_state() ? id(indoor_temp).state : NAN,
+        id(indoor_hum).has_state() ? id(indoor_hum).state : NAN,
+        id(vbat).has_state() ? id(vbat).state : NAN,
+        id(charging).state,
+        id(usb_power).state,
+        id(fetch_ok),
+      };
+      wf::render(it, fonts, s, id(low_battery));
+
+
+font:
+  # Text: Inter from Google Fonts. Latin + German umlauts + degree sign.
+  - file: "gfonts://Inter@700"
+    id: f_huge
+    size: 120
+    bpp: 1
+    glyphs: "-0123456789°."
+  - file: "gfonts://Inter@600"
+    id: f_large
+    size: 40
+    bpp: 1
+    glyphs: &text_glyphs " !\"%&'()+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz°ÄÖÜäöüß–"
+  - file: "gfonts://Inter@600"
+    id: f_medium
+    size: 26
+    bpp: 1
+    glyphs: *text_glyphs
+  - file: "gfonts://Inter@500"
+    id: f_small
+    size: 19
+    bpp: 1
+    glyphs: *text_glyphs
+
+  # Icons: Material Design Icons webfont.
+  - file: &mdi
+      type: web
+      url: https://raw.githubusercontent.com/Templarian/MaterialDesign-Webfont/master/fonts/materialdesignicons-webfont.ttf
+    id: i_xl
+    size: 150
+    bpp: 1
+    glyphs: &weather_icons
+      - "\U000F0599" # weather-sunny
+      - "\U000F0594" # weather-night
+      - "\U000F0595" # weather-partly-cloudy
+      - "\U000F0F31" # weather-night-partly-cloudy
+      - "\U000F0590" # weather-cloudy
+      - "\U000F0591" # weather-fog
+      - "\U000F0592" # weather-hail
+      - "\U000F0593" # weather-lightning
+      - "\U000F067E" # weather-lightning-rainy
+      - "\U000F0596" # weather-pouring
+      - "\U000F0597" # weather-rainy
+      - "\U000F0F33" # weather-partly-rainy
+      - "\U000F0598" # weather-snowy
+      - "\U000F0F36" # weather-snowy-heavy
+      - "\U000F067F" # weather-snowy-rainy
+      - "\U000F05AA" # wifi-off
+      - "\U000F0083" # battery-alert
+  - file: *mdi
+    id: i_l
+    size: 56
+    bpp: 1
+    glyphs:
+      - "\U000F0599"
+      - "\U000F0594"
+      - "\U000F0595"
+      - "\U000F0F31"
+      - "\U000F0590"
+      - "\U000F0591"
+      - "\U000F0592"
+      - "\U000F0593"
+      - "\U000F067E"
+      - "\U000F0596"
+      - "\U000F0597"
+      - "\U000F0F33"
+      - "\U000F0598"
+      - "\U000F0F36"
+      - "\U000F067F"
+      - "\U000F0F55" # home-thermometer-outline
+  - file: *mdi
+    id: i_s
+    size: 28
+    bpp: 1
+    glyphs:
+      - "\U000F059C" # weather-sunset-up
+      - "\U000F059B" # weather-sunset-down
+      - "\U000F058E" # water-percent
+      - "\U000F059D" # weather-windy
+      - "\U000F054B" # umbrella-outline
+      - "\U000F05AA" # wifi-off
+      - "\U000F0084" # battery-charging

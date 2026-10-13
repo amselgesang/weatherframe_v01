@@ -1,0 +1,3 @@
+gerbers: /Users/treffhetes/Desktop/Projects/physical/test01/hardware/kicad/weatherframe/fab/weatherframe_gerbers.zip 11 files
+bom: /Users/treffhetes/Desktop/Projects/physical/test01/hardware/kicad/weatherframe/fab/bom_jlc.csv 29 lines
+cpl: /Users/treffhetes/Desktop/Projects/physical/test01/hardware/kicad/weatherframe/fab/cpl_jlc.csv 45 placements 
